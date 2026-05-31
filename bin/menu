@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# menu — launcher / cheat-sheet for the hacker-dashboard toolkit.
+# No args: interactive picker (uses fzf if available, falls back to numbered list).
+# Any arg: just print the list and exit.
+
+set -u
+
+# Colors
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+  GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; CYAN=$'\033[36m'
+else
+  BOLD=""; DIM=""; RESET=""; GREEN=""; YELLOW=""; RED=""; CYAN=""
+fi
+
+# Registry: NAME | USAGE | DESCRIPTION
+# Edit this list to add/remove tools.
+TOOLS=(
+  "update    |update           |run all system tool updates (brew, conda, flutter, npm, …)"
+  "morning   |morning          |daily kickoff: weather, battery, disk, repos, GH, calendar"
+  "sweep     |sweep            |reclaim disk space across pip/npm/brew/docker/xcode caches"
+  "doctor    |doctor           |read-only system health diagnostics"
+  "recon     |recon            |local network reconnaissance dashboard"
+  "focus     |focus [25m]      |pomodoro timer w/ block-digit countdown (sets DnD)"
+  "ship      |ship [-n] [-m ?] |git workflow: lint → test → commit → push → PR"
+  "menu      |menu             |this launcher"
+)
+
+# Banner
+print_banner() {
+  printf '\n%s' "$GREEN"
+  cat <<'EOF'
+  ███╗   ███╗███████╗███╗   ██╗██╗   ██╗
+  ████╗ ████║██╔════╝████╗  ██║██║   ██║
+  ██╔████╔██║█████╗  ██╔██╗ ██║██║   ██║
+  ██║╚██╔╝██║██╔══╝  ██║╚██╗██║██║   ██║
+  ██║ ╚═╝ ██║███████╗██║ ╚████║╚██████╔╝
+  ╚═╝     ╚═╝╚══════╝╚═╝  ╚═══╝ ╚═════╝
+EOF
+  printf '%s\n' "$RESET"
+  printf '   %s[ TOOLKIT :: %d payloads available ]%s\n\n' \
+    "$DIM" "${#TOOLS[@]}" "$RESET"
+}
+
+# Print the list nicely. Shows ▸ NAME (USAGE) :: DESCRIPTION
+print_list() {
+  local row name usage desc icon color
+  for row in "${TOOLS[@]}"; do
+    IFS='|' read -r name usage desc <<<"$row"
+    name=$(printf '%s' "$name" | sed 's/[[:space:]]*$//')
+    usage=$(printf '%s' "$usage" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    desc=$(printf '%s' "$desc" | sed 's/^[[:space:]]*//')
+
+    if command -v "$name" >/dev/null 2>&1; then icon="▸"; color="$BOLD$GREEN"
+    else                                        icon="✗"; color="$DIM$RED"; fi
+
+    printf '   %s%s %-9s%s %s%-18s%s %s::%s %s%s%s\n' \
+      "$color" "$icon" "$name" "$RESET" \
+      "$DIM" "$usage" "$RESET" \
+      "$GREEN" "$RESET" \
+      "$DIM" "$desc" "$RESET"
+  done
+}
+
+# Build entries for fzf picker
+fzf_entries() {
+  local row name usage desc
+  for row in "${TOOLS[@]}"; do
+    IFS='|' read -r name usage desc <<<"$row"
+    name=$(printf '%s' "$name" | sed 's/[[:space:]]*$//')
+    usage=$(printf '%s' "$usage" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    desc=$(printf '%s' "$desc" | sed 's/^[[:space:]]*//')
+    # First field = command name, then usage and desc for readability
+    printf '%-9s  %-20s  %s\n' "$name" "$usage" "$desc"
+  done
+}
+
+# Fallback picker: numbered list + read
+numbered_picker() {
+  local i=0 row name names=()
+  for row in "${TOOLS[@]}"; do
+    IFS='|' read -r name _ _ <<<"$row"
+    name=$(printf '%s' "$name" | sed 's/[[:space:]]*$//')
+    names+=("$name")
+    i=$((i+1))
+    printf '   %s%2d)%s %s%s%s\n' "$DIM" "$i" "$RESET" "$BOLD$GREEN" "$name" "$RESET" >&2
+  done
+  printf '\n   %s↪ select [1-%d, q to quit]:%s ' "$YELLOW" "${#names[@]}" "$RESET" >&2
+  local choice
+  read -r choice
+  [[ "$choice" == "q" || -z "$choice" ]] && return 1
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
+    printf '%s' "${names[$((choice-1))]}"
+    return 0
+  fi
+  return 1
+}
+
+# Modes:
+#   no arg → interactive picker, then launch
+#   --list / -l → just print, don't launch
+#   --help / -h → print and explain
+case "${1:-}" in
+  -h|--help|help)
+    print_banner
+    print_list
+    printf '\n   %sUsage:%s %smenu%s              interactive picker\n' "$BOLD" "$RESET" "$CYAN" "$RESET"
+    printf '          %smenu --list%s       just print the list\n'         "$CYAN" "$RESET"
+    printf '          %smenu <name>%s       launch by name (e.g. menu doctor)\n\n' "$CYAN" "$RESET"
+    exit 0
+    ;;
+  -l|--list|list)
+    print_banner
+    print_list
+    printf '\n'
+    exit 0
+    ;;
+  "")
+    print_banner
+    if command -v fzf >/dev/null 2>&1; then
+      print_list
+      printf '\n'
+      chosen=$(fzf_entries | fzf \
+        --reverse --height=40% --border=rounded \
+        --header="$(printf '%s↪ select payload (esc to cancel)%s' "$YELLOW" "$RESET")" \
+        --color="fg:46,bg:-1,hl:226,fg+:46:bold,bg+:-1,hl+:226:bold,info:240,prompt:46,pointer:226,marker:226,header:240" \
+        --prompt="> " --pointer="▸" --ansi)
+      [[ -z "$chosen" ]] && exit 0
+      cmd_name=$(printf '%s' "$chosen" | awk '{print $1}')
+    else
+      print_list
+      printf '\n'
+      cmd_name=$(numbered_picker) || exit 0
+    fi
+    if [[ "$cmd_name" == "menu" ]]; then
+      exec "$0"
+    fi
+    if ! command -v "$cmd_name" >/dev/null 2>&1; then
+      printf '   %s✗ %s not on PATH%s\n' "$RED" "$cmd_name" "$RESET"
+      exit 1
+    fi
+    printf '\n   %s↪ launching %s%s%s …%s\n\n' "$DIM" "$BOLD$GREEN" "$cmd_name" "$RESET$DIM" "$RESET"
+    sleep 0.4
+    exec "$cmd_name"
+    ;;
+  *)
+    # menu <name> → launch directly if it's in our registry
+    cmd_name="$1"; shift || true
+    found=0
+    for row in "${TOOLS[@]}"; do
+      reg="$(printf '%s' "${row%%|*}" | sed 's/[[:space:]]*$//')"
+      if [[ "$reg" == "$cmd_name" ]]; then found=1; break; fi
+    done
+    if (( ! found )); then
+      printf '%s✗ unknown tool: %s%s\n' "$RED" "$cmd_name" "$RESET" >&2
+      printf '%srun "menu --list" to see available tools%s\n' "$DIM" "$RESET" >&2
+      exit 2
+    fi
+    if ! command -v "$cmd_name" >/dev/null 2>&1; then
+      printf '%s✗ %s not on PATH%s\n' "$RED" "$cmd_name" "$RESET" >&2
+      exit 1
+    fi
+    exec "$cmd_name" "$@"
+    ;;
+esac

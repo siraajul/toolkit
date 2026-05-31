@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# recon — local network reconnaissance dashboard.
+
+# shellcheck source=/dev/null disable=SC2329  # step funcs run indirectly via dashlib run_step
+source ~/.local/share/dashlib/dashlib.sh
+dash_init "NET.RECON" "RECON"
+
+do_public_ip() {
+  local ip
+  ip=$(curl -fsSL --max-time 4 https://ipinfo.io/ip 2>/dev/null)
+  echo "public ip: $ip"
+  set_result "${ip:-N/A}"
+}
+
+do_isp() {
+  local org
+  org=$(curl -fsSL --max-time 4 https://ipinfo.io/org 2>/dev/null | awk '{print $2}')
+  echo "org: $org"
+  set_result "${org:-?}"
+}
+
+do_geo() {
+  local g
+  g=$(curl -fsSL --max-time 4 https://ipinfo.io/city 2>/dev/null)
+  echo "city: $g"
+  set_result "${g:-?}"
+}
+
+do_lan_ip() {
+  local ip
+  ip=$(ipconfig getifaddr en0 2>/dev/null)
+  [[ -z "$ip" ]] && ip=$(ipconfig getifaddr en1 2>/dev/null)
+  echo "lan: $ip"
+  if [[ -z "$ip" ]]; then set_result "OFFLINE"; return 1; fi
+  set_result "$ip"
+}
+
+do_gateway() {
+  local gw; gw=$(route -n get default 2>/dev/null | awk '/gateway/{print $2}')
+  echo "gateway: $gw"
+  set_result "${gw:-NONE}"
+}
+
+do_wifi_ssid() {
+  # macOS 14+ blocks SSID lookup unless the caller has Location Services permission.
+  # Try networksetup first; fall back to ipconfig/system_profiler. If all blocked, skip.
+  local ssid=""
+  if have networksetup; then
+    ssid=$(networksetup -getairportnetwork en0 2>/dev/null | sed 's/^Current Wi-Fi Network: //')
+  fi
+  if [[ -z "$ssid" || "$ssid" == *"not associated"* || "$ssid" == *"You are not"* ]]; then
+    # Try system_profiler — also gated, but worth a shot.
+    ssid=$(system_profiler SPAirPortDataType 2>/dev/null | awk '/Current Network Information:/{f=1;next} f && /:/{gsub(/^ +| +$/,"",$0); sub(/:$/,"",$0); print; exit}')
+  fi
+  echo "ssid: $ssid"
+  if [[ -z "$ssid" ]]; then
+    set_result "GATED"; return 2     # macOS location-services gated
+  elif [[ "$ssid" == *"not associated"* ]]; then
+    set_result "OFFLINE"; return 1
+  else
+    set_result "${ssid:0:12}"
+  fi
+}
+
+do_dns_servers() {
+  local s
+  s=$(scutil --dns 2>/dev/null | awk '/nameserver/{print $3}' | sort -u | head -3 | paste -sd' ' -)
+  echo "dns: $s"
+  set_result "${s%% *}"
+}
+
+do_arp_devices() {
+  local n
+  n=$(arp -a 2>/dev/null | grep -vc incomplete)
+  arp -a 2>/dev/null | head -10
+  set_result "$n hosts"
+}
+
+do_listening_ports() {
+  local n
+  n=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+  lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -20
+  set_result "$n open"
+}
+
+do_established_count() {
+  local n
+  n=$(netstat -an 2>/dev/null | grep -c ESTABLISHED)
+  set_result "$n conns"
+}
+
+do_top_destinations() {
+  local out
+  out=$(netstat -an 2>/dev/null | awk '/ESTABLISHED/ {print $5}' | awk -F. '{print $1"."$2"."$3"."$4}' | sort -u | wc -l | tr -d ' ')
+  set_result "$out remote"
+}
+
+do_vpn_status() {
+  local up
+  up=$(ifconfig 2>/dev/null | grep -cE '^utun[0-9]+:')
+  if (( up > 0 )); then set_result "$up tun up"
+  else set_result "NONE"; fi
+}
+
+do_hostname() {
+  local h; h=$(hostname)
+  echo "$h"
+  set_result "${h:0:12}"
+}
+
+do_mac_address() {
+  local mac
+  mac=$(ifconfig en0 2>/dev/null | awk '/ether/{print $2}')
+  echo "$mac"
+  set_result "${mac:9:8}"
+}
+
+do_open_ports_scan() {
+  # Self-scan common ports on localhost via /dev/tcp
+  local ports=(22 80 443 3000 5000 5432 6379 8080 8443 27017)
+  local open=()
+  local p
+  for p in "${ports[@]}"; do
+    (echo > "/dev/tcp/127.0.0.1/$p") 2>/dev/null && open+=("$p")
+  done
+  echo "open localhost ports: ${open[*]:-none}"
+  set_result "${#open[@]} open"
+}
+
+add_step "HOST.NAME"        do_hostname
+add_step "MAC.ADDR"         do_mac_address
+add_step "LAN.IP"           do_lan_ip
+add_step "GATEWAY.IP"       do_gateway
+add_step "WIFI.SSID"        do_wifi_ssid
+add_step "DNS.SERVERS"      do_dns_servers
+add_step "PUBLIC.IP"        do_public_ip
+add_step "ISP.ORG"          do_isp
+add_step "GEO.CITY"         do_geo
+add_step "VPN.STATUS"       do_vpn_status
+add_step "ARP.NEIGHBORS"    do_arp_devices
+add_step "PORTS.LISTEN"     do_listening_ports
+add_step "PORTS.LOCALSCAN"  do_open_ports_scan
+add_step "CONN.ESTABLISHED" do_established_count
+add_step "CONN.REMOTES"     do_top_destinations
+
+dash_run
+dash_summary ">> RECONNAISSANCE COMPLETE <<"
+exit "$FAILED"

@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# focus — pomodoro with hacker UI.
+# usage: focus [DURATION]   e.g. focus 25m   focus 90s   focus 1h
+#        focus              defaults to 25m
+
+set -u
+
+ARG="${1:-25m}"
+
+# Parse duration to seconds
+parse_dur() {
+  local s="$1"
+  local n unit
+  if [[ "$s" =~ ^([0-9]+)([smhSMH]?)$ ]]; then
+    n="${BASH_REMATCH[1]}"
+    unit=$(printf '%s' "${BASH_REMATCH[2]}" | tr '[:upper:]' '[:lower:]')
+    case "$unit" in
+      s|"") echo "$n" ;;
+      m)    echo $((n * 60)) ;;
+      h)    echo $((n * 3600)) ;;
+    esac
+  else
+    echo 1500
+  fi
+}
+
+TOTAL=$(parse_dur "$ARG")
+
+# Colors
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+  GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'
+else
+  BOLD=""; DIM=""; RESET=""; GREEN=""; RED=""; YELLOW=""; CYAN=""
+fi
+
+# Big-digit blocks 5-tall (each digit 3 wide). Returns the row-th line.
+# Args: digit_char row_index (0..4)
+digit_row() {
+  local c="$1" r="$2"
+  case "$c$r" in
+    "00") echo "███" ;; "01") echo "█ █" ;; "02") echo "█ █" ;; "03") echo "█ █" ;; "04") echo "███" ;;
+    "10") echo "  █" ;; "11") echo "  █" ;; "12") echo "  █" ;; "13") echo "  █" ;; "14") echo "  █" ;;
+    "20") echo "███" ;; "21") echo "  █" ;; "22") echo "███" ;; "23") echo "█  " ;; "24") echo "███" ;;
+    "30") echo "███" ;; "31") echo "  █" ;; "32") echo "███" ;; "33") echo "  █" ;; "34") echo "███" ;;
+    "40") echo "█ █" ;; "41") echo "█ █" ;; "42") echo "███" ;; "43") echo "  █" ;; "44") echo "  █" ;;
+    "50") echo "███" ;; "51") echo "█  " ;; "52") echo "███" ;; "53") echo "  █" ;; "54") echo "███" ;;
+    "60") echo "███" ;; "61") echo "█  " ;; "62") echo "███" ;; "63") echo "█ █" ;; "64") echo "███" ;;
+    "70") echo "███" ;; "71") echo "  █" ;; "72") echo "  █" ;; "73") echo "  █" ;; "74") echo "  █" ;;
+    "80") echo "███" ;; "81") echo "█ █" ;; "82") echo "███" ;; "83") echo "█ █" ;; "84") echo "███" ;;
+    "90") echo "███" ;; "91") echo "█ █" ;; "92") echo "███" ;; "93") echo "  █" ;; "94") echo "███" ;;
+    ":0") echo "   " ;; ":1") echo " █ " ;; ":2") echo "   " ;; ":3") echo " █ " ;; ":4") echo "   " ;;
+    *)    echo "   " ;;
+  esac
+}
+
+# Print MM:SS as 5-row big text
+print_big_time() {
+  local mins=$1 secs=$2
+  local s
+  s=$(printf '%02d:%02d' "$mins" "$secs")
+  local r i c row
+  for r in 0 1 2 3 4; do
+    printf '  '
+    for (( i=0; i<${#s}; i++ )); do
+      c="${s:$i:1}"
+      row=$(digit_row "$c" "$r")
+      printf '%s%s%s  ' "$GREEN" "$row" "$RESET"
+    done
+    printf '\n'
+  done
+}
+
+# DnD on/off via macOS Shortcuts (user must create shortcuts named "DND On"/"DND Off")
+dnd_on()  { have shortcuts && shortcuts run "DND On"  >/dev/null 2>&1 || true; }
+dnd_off() { have shortcuts && shortcuts run "DND Off" >/dev/null 2>&1 || true; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Slack DnD via API (optional, set SLACK_TOKEN in env)
+slack_dnd_on() {
+  [[ -n "${SLACK_TOKEN:-}" ]] || return 0
+  local mins=$1
+  curl -fsSL -X POST -H "Authorization: Bearer $SLACK_TOKEN" \
+    "https://slack.com/api/dnd.setSnooze?num_minutes=$mins" >/dev/null 2>&1 || true
+}
+slack_dnd_off() {
+  [[ -n "${SLACK_TOKEN:-}" ]] || return 0
+  curl -fsSL -X POST -H "Authorization: Bearer $SLACK_TOKEN" \
+    "https://slack.com/api/dnd.endSnooze" >/dev/null 2>&1 || true
+}
+
+# Render progress bar across COLS
+COLS=$(tput cols 2>/dev/null || echo 80)
+BARW=$(( COLS - 16 ))
+(( BARW < 20 )) && BARW=20
+
+draw_bar() {
+  local pct=$1
+  local fill=$(( BARW * pct / 100 ))
+  local bar="" i
+  for (( i=0; i<fill; i++ )); do bar+="█"; done
+  for (( i=fill; i<BARW; i++ )); do bar+="░"; done
+  printf '   %s[%s]%s %s%3d%%%s' "$GREEN" "$bar" "$RESET" "$BOLD$GREEN" "$pct" "$RESET"
+}
+
+cleanup() {
+  tput cnorm 2>/dev/null
+  dnd_off
+  slack_dnd_off
+  printf '\n'
+}
+trap cleanup EXIT INT TERM
+
+clear
+tput civis 2>/dev/null
+
+# Header banner
+printf '\n%s' "$GREEN"
+cat <<'EOF'
+  ███████╗ ██████╗  ██████╗██╗   ██╗███████╗
+  ██╔════╝██╔═══██╗██╔════╝██║   ██║██╔════╝
+  █████╗  ██║   ██║██║     ██║   ██║███████╗
+  ██╔══╝  ██║   ██║██║     ██║   ██║╚════██║
+  ██║     ╚██████╔╝╚██████╗╚██████╔╝███████║
+  ╚═╝      ╚═════╝  ╚═════╝ ╚═════╝ ╚══════╝
+EOF
+printf '%s\n' "$RESET"
+
+printf '   %s[ FOCUS.MODE :: target=%ss :: pid=%d ]%s\n\n' "$DIM" "$TOTAL" "$$" "$RESET"
+
+dnd_on
+slack_dnd_on $((TOTAL / 60 + 1))
+
+START=$(date +%s)
+END=$(( START + TOTAL ))
+
+while :; do
+  NOW=$(date +%s)
+  REMAIN=$(( END - NOW ))
+  (( REMAIN <= 0 )) && break
+
+  MINS=$(( REMAIN / 60 ))
+  SECS=$(( REMAIN % 60 ))
+  ELAPSED=$(( TOTAL - REMAIN ))
+  PCT=$(( ELAPSED * 100 / TOTAL ))
+
+  # Move to top of timer area each tick
+  printf '\033[10;1H'
+  # Clear 8 lines for timer + bar
+  for i in 1 2 3 4 5 6 7 8; do printf '\033[2K\n'; done
+  printf '\033[10;1H'
+
+  print_big_time "$MINS" "$SECS"
+  printf '\n'
+  draw_bar "$PCT"
+
+  sleep 1
+done
+
+# Ring the bell
+printf '\a\a\a'
+clear
+
+# Finale
+printf '\n%s%s' "$BOLD" "$GREEN"
+cat <<'EOF'
+   ██████╗  ██████╗ ███╗   ██╗███████╗
+   ██╔══██╗██╔═══██╗████╗  ██║██╔════╝
+   ██║  ██║██║   ██║██╔██╗ ██║█████╗
+   ██║  ██║██║   ██║██║╚██╗██║██╔══╝
+   ██████╔╝╚██████╔╝██║ ╚████║███████╗
+   ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+EOF
+printf '%s\n' "$RESET"
+
+DUR_FMT=$(printf '%dm%02ds' $((TOTAL/60)) $((TOTAL%60)))
+printf '   %s>> FOCUS BLOCK COMPLETE :: %s <<%s\n\n' "$BOLD$YELLOW" "$DUR_FMT" "$RESET"
+
+# Debrief prompt
+tput cnorm 2>/dev/null
+printf '   %s↪ debrief (1 line) :%s ' "$DIM" "$RESET"
+read -r DEBRIEF
+if [[ -n "$DEBRIEF" ]]; then
+  mkdir -p "$HOME/.local/state/focus"
+  printf '%s | %ss | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$TOTAL" "$DEBRIEF" \
+    >> "$HOME/.local/state/focus/log.txt"
+  printf '   %s✓ logged to ~/.local/state/focus/log.txt%s\n' "$GREEN" "$RESET"
+fi

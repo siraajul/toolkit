@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# ship — git workflow as a dashboard. Lint → typecheck → test → commit → push → PR.
+# Run inside a git repo. Pass commit message via -m "...", otherwise auto-generated.
+
+# shellcheck source=/dev/null disable=SC2329  # step funcs run indirectly via dashlib run_step
+source ~/.local/share/dashlib/dashlib.sh
+
+COMMIT_MSG=""
+DRY_RUN=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -m|--message) COMMIT_MSG="$2"; shift 2 ;;
+    -n|--dry-run) DRY_RUN=1; shift ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+dash_init "GIT.SHIP" "DEPLOY"
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  printf '%snot a git repository%s\n' "$RED" "$RESET" >&2
+  exit 1
+}
+cd "$REPO_ROOT" || exit 1
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+  printf '%srefusing to ship from %s — make a feature branch first%s\n' "$RED" "$BRANCH" "$RESET" >&2
+  exit 1
+fi
+
+# Detect what to lint / test based on project files
+do_check_tree() {
+  if [[ -z "$(git status --porcelain)" ]]; then
+    set_result "clean"
+    echo "nothing to commit"
+    return 1
+  fi
+  local n; n=$(git status --porcelain | wc -l | tr -d ' ')
+  set_result "$n changes"
+  git status --short
+}
+
+do_lint() {
+  if   [[ -f package.json ]] && jq -e '.scripts.lint' package.json >/dev/null 2>&1; then
+    npm run -s lint
+  elif [[ -f Cargo.toml ]]; then
+    cargo clippy --quiet -- -D warnings
+  elif [[ -f pyproject.toml ]] && have ruff; then
+    ruff check .
+  elif [[ -f go.mod ]]; then
+    go vet ./...
+  else
+    set_result "N/A"; return 0
+  fi
+  set_result "passed"
+}
+
+do_typecheck() {
+  if   [[ -f tsconfig.json ]] && [[ -f package.json ]]; then
+    if jq -e '.scripts.typecheck' package.json >/dev/null 2>&1; then
+      npm run -s typecheck
+    else
+      npx --no-install tsc --noEmit
+    fi
+  elif [[ -f pyproject.toml ]] && have mypy; then
+    mypy .
+  elif [[ -f Cargo.toml ]]; then
+    cargo check --quiet
+  elif [[ -f go.mod ]]; then
+    go build ./... >/dev/null
+  else
+    set_result "N/A"; return 0
+  fi
+  set_result "passed"
+}
+
+do_test() {
+  if   [[ -f package.json ]] && jq -e '.scripts.test' package.json >/dev/null 2>&1; then
+    npm test -- --silent 2>&1 || npm test
+  elif [[ -f Cargo.toml ]]; then
+    cargo test --quiet
+  elif [[ -f pyproject.toml ]] && have pytest; then
+    pytest -q
+  elif [[ -f go.mod ]]; then
+    go test ./...
+  else
+    set_result "N/A"; return 0
+  fi
+  set_result "passed"
+}
+
+do_stage() {
+  if [[ -z "$(git status --porcelain)" ]]; then
+    set_result "nothing"; return 0
+  fi
+  if [[ -z "$(git diff --cached --name-only)" ]]; then
+    git add -u   # only tracked changes; don't auto-add untracked
+    if [[ -z "$(git diff --cached --name-only)" ]]; then
+      set_result "no tracked changes (stage manually)"; return 1
+    fi
+  fi
+  local n; n=$(git diff --cached --name-only | wc -l | tr -d ' ')
+  set_result "$n staged"
+  git diff --cached --stat
+}
+
+do_commit() {
+  if [[ -z "$(git diff --cached --name-only)" ]]; then
+    set_result "nothing staged"; return 1
+  fi
+  local msg="$COMMIT_MSG"
+  if [[ -z "$msg" ]]; then
+    # Auto-generate: title from largest changed file basename + change-type guess
+    local files; files=$(git diff --cached --name-only | head -5 | tr '\n' ' ')
+    local n_added n_removed
+    n_added=$(git diff --cached --numstat | awk '{a+=$1} END{print a+0}')
+    n_removed=$(git diff --cached --numstat | awk '{r+=$2} END{print r+0}')
+    msg="update: $(echo "$files" | head -c 50) (+$n_added -$n_removed)"
+  fi
+  if (( DRY_RUN )); then
+    set_result "DRY-RUN"
+    echo "would commit: $msg"
+    return 0
+  fi
+  git commit -m "$msg"
+  set_result "committed"
+}
+
+do_push() {
+  if (( DRY_RUN )); then set_result "DRY-RUN"; return 0; fi
+  local upstream
+  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+  if [[ -z "$upstream" ]]; then
+    git push -u origin "$BRANCH"
+  else
+    git push
+  fi
+  set_result "pushed"
+}
+
+do_pr() {
+  if ! have gh; then set_result "NO GH"; return 2; fi
+  if (( DRY_RUN )); then set_result "DRY-RUN"; return 0; fi
+  local existing
+  existing=$(gh pr view --json url -q .url 2>/dev/null)
+  if [[ -n "$existing" ]]; then
+    set_result "exists"
+    echo "$existing"
+    return 0
+  fi
+  gh pr create --fill 2>&1
+  set_result "created"
+}
+
+do_notify() {
+  if [[ -z "${SLACK_WEBHOOK:-}" ]]; then set_result "NO HOOK"; return 2; fi
+  if (( DRY_RUN )); then set_result "DRY-RUN"; return 0; fi
+  local url; url=$(gh pr view --json url -q .url 2>/dev/null)
+  local payload; payload=$(printf '{"text":"shipped %s: %s"}' "$BRANCH" "${url:-$BRANCH}")
+  curl -fsSL -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK" >/dev/null
+  set_result "posted"
+}
+
+add_step "TREE.CHECK"   do_check_tree
+add_step "LINT.RUN"     do_lint
+add_step "TYPE.CHECK"   do_typecheck
+add_step "TEST.RUN"     do_test
+add_step "GIT.STAGE"    do_stage
+add_step "GIT.COMMIT"   do_commit
+add_step "GIT.PUSH"     do_push
+add_step "GH.PR.OPEN"   do_pr
+add_step "SLACK.NOTIFY" do_notify
+
+dash_run
+dash_summary ">> SHIPPED <<"
+exit "$FAILED"

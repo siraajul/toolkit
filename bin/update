@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# update — refresh all system / dev toolchains in a 2-column hacker dashboard.
+# Continues on failure so one broken tool doesn't block the rest.
+# Exits non-zero if any step failed.
+#
+# Engine (banner, grid, spinner, summary, logging) lives in dashlib.sh.
+
+# shellcheck source=/dev/null disable=SC2329  # step funcs run indirectly via dashlib run_step
+source ~/.local/share/dashlib/dashlib.sh
+dash_init "SYS.UPDATE" "UPDATE"
+
+# ---------- step funcs ----------
+# Each runs in a backgrounded subshell with stdout+stderr captured to the log.
+# rc 0 = ok, rc 2 = not-applicable/skip, anything else = fail.
+do_brew_update()    { brew update; }
+do_brew_upgrade()   { brew upgrade; }
+do_brew_cleanup()   { brew cleanup; }
+do_conda_update()   { conda update -n base -c conda-forge conda -y; }
+do_flutter()        { flutter upgrade || { echo "(retrying with --force)"; flutter upgrade --force; }; }
+do_npm()            { npm update -g; }
+do_rustup()         { rustup update; }
+do_uv()             { uv self update; }
+do_gem()            { "$GEM_BIN" update --system; }
+do_softwareupdate() { softwareupdate -l; }   # list only — never auto-installs
+
+# ---------- discovery ----------
+GEM_BIN=""
+
+have brew && {
+  add_step "HOMEBREW.UPDATE"  do_brew_update
+  add_step "HOMEBREW.UPGRADE" do_brew_upgrade
+  add_step "HOMEBREW.CLEANUP" do_brew_cleanup
+}
+have conda   && add_step "CONDA.BASE"       do_conda_update
+have flutter && add_step "FLUTTER.SDK"      do_flutter
+have npm     && add_step "NPM.GLOBAL"       do_npm
+have rustup  && add_step "RUSTUP.TOOLCHAIN" do_rustup
+have uv      && add_step "UV.SELF"          do_uv
+
+# gem: prefer brew Ruby; skip Apple's read-only system gem
+for cand in /opt/homebrew/opt/ruby/bin/gem /usr/local/opt/ruby/bin/gem; do
+  if [[ -x "$cand" ]]; then GEM_BIN="$cand"; break; fi
+done
+if [[ -n "$GEM_BIN" ]]; then
+  add_step "GEM.SYSTEM" do_gem
+elif have gem; then
+  add_skip "GEM.SYSTEM" "system ruby read-only"
+fi
+
+have softwareupdate && add_step "MACOS.SOFTWARE" do_softwareupdate
+
+# ---------- run ----------
+dash_run
+dash_summary ">> ACCESS GRANTED <<"
+exit "$FAILED"

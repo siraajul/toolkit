@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# morning — daily kickoff dashboard.
+# Shows: outdated tools, git repo status, GitHub notifications, calendar, weather.
+
+# shellcheck source=/dev/null disable=SC2329  # step funcs run indirectly via dashlib run_step
+source ~/.local/share/dashlib/dashlib.sh
+dash_init "MORNING.BRIEF" "MORNING BRIEF"
+
+# Step functions — write the cell info to STEP_RESULT for a custom result line.
+
+do_brew_outdated() {
+  if ! have brew; then echo "no brew"; set_result "NO BREW"; return 2; fi
+  local n; n=$(brew outdated --quiet 2>/dev/null | wc -l | tr -d ' ')
+  echo "outdated: $n"
+  if (( n == 0 )); then set_result "all current"; else set_result "$n outdated"; fi
+}
+
+do_npm_outdated() {
+  if ! have npm; then echo "no npm"; set_result "NO NPM"; return 2; fi
+  local n; n=$(npm -g outdated --parseable 2>/dev/null | wc -l | tr -d ' ')
+  echo "global outdated: $n"
+  if (( n == 0 )); then set_result "all current"; else set_result "$n outdated"; fi
+}
+
+do_git_repos() {
+  # REPO_DIRS (colon-sep) takes precedence; otherwise scan $HOME with pruning.
+  local dirty=0 clean=0 r repo
+  local find_args=()
+  if [[ -n "${REPO_DIRS:-}" ]]; then
+    local IFS=':' root
+    for root in $REPO_DIRS; do
+      [[ -d "$root" ]] && find_args+=("$root")
+    done
+    unset IFS
+  else
+    find_args=("$HOME")
+  fi
+
+  while IFS= read -r r; do
+    repo="$(dirname "$r")"
+    ( cd "$repo" || exit 9
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 9
+      if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then exit 1; fi
+      exit 0
+    )
+    case $? in
+      0) clean=$((clean+1));;
+      1) dirty=$((dirty+1));;
+    esac
+  done < <(
+    find "${find_args[@]}" -maxdepth 4 \
+      \( -name node_modules -o -name .Trash -o -name Library \
+         -o -name .npm -o -name .cache -o -name .cargo -o -name .rustup \
+         -o -name .pyenv -o -name .conda -o -name miniconda3 \
+         -o -name Pictures -o -name Movies -o -name Music \
+         -o -name Applications -o -name Public \) -prune -o \
+      -name .git -type d -print 2>/dev/null
+  )
+
+  local total=$((clean + dirty))
+  echo "repos: $total  clean=$clean  dirty=$dirty"
+  if (( total == 0 )); then set_result "NO REPOS"; return 2; fi
+  set_result "${dirty}d/${total}t"
+}
+
+do_gh_notifications() {
+  if ! have gh; then set_result "NO GH"; return 2; fi
+  if ! gh auth status >/dev/null 2>&1; then set_result "NOT AUTHED"; return 2; fi
+  local n; n=$(gh api /notifications --jq 'length' 2>/dev/null || echo 0)
+  echo "notifications: $n"
+  set_result "$n unread"
+}
+
+do_gh_prs() {
+  if ! have gh; then set_result "NO GH"; return 2; fi
+  if ! gh auth status >/dev/null 2>&1; then set_result "NOT AUTHED"; return 2; fi
+  local mine review
+  mine=$(gh search prs --author=@me --state=open --json url 2>/dev/null | grep -c '"url"')
+  review=$(gh search prs --review-requested=@me --state=open --json url 2>/dev/null | grep -c '"url"')
+  echo "open mine: $mine  review-requested: $review"
+  set_result "${mine}m/${review}r"
+}
+
+do_battery() {
+  if have pmset; then
+    local pct; pct=$(pmset -g batt 2>/dev/null | grep -Eo '[0-9]+%' | head -1 | tr -d '%')
+    local charging; charging=$(pmset -g batt 2>/dev/null | grep -q "AC Power" && echo "AC" || echo "BAT")
+    echo "battery: ${pct}%  ($charging)"
+    set_result "${pct}% $charging"
+  else
+    set_result "N/A"
+  fi
+}
+
+do_disk() {
+  local pct; pct=$(df -h / | awk 'NR==2 {gsub("%",""); print $5}')
+  local free; free=$(df -h / | awk 'NR==2 {print $4}')
+  echo "root: ${pct}% used, $free free"
+  set_result "${free} free"
+}
+
+do_uptime() {
+  local up; up=$(uptime | sed -E 's/.*up +([^,]+),.*/\1/')
+  echo "$up"
+  set_result "$up"
+}
+
+do_weather() {
+  # wttr.in single-line current conditions; degrade gracefully if offline.
+  local w
+  w=$(curl -fsSL --max-time 4 'wttr.in/?format=%l:+%c+%t+%w' 2>/dev/null)
+  if [[ -z "$w" ]]; then set_result "OFFLINE"; return 2; fi
+  echo "$w"
+  # extract just temp + condition icon for cell
+  local cell; cell=$(printf '%s' "$w" | awk '{print $2, $3}')
+  set_result "$cell"
+}
+
+do_calendar() {
+  # Use icalBuddy if present (brew install ical-buddy), else macOS shortcuts, else skip.
+  if have icalBuddy; then
+    local events n
+    events=$(icalBuddy -nc -nrd -eed eventsToday 2>/dev/null)
+    n=$(printf '%s\n' "$events" | grep -c '^•')
+    printf '%s\n' "$events" | head -20
+    set_result "$n events"
+  else
+    set_result "NO ICAL"
+    return 2
+  fi
+}
+
+do_today() {
+  local d; d=$(date "+%a %b %d, %Y")
+  echo "$d"
+  set_result "$(date '+%a %d')"
+}
+
+# Register
+add_step "DATE.TODAY"      do_today
+add_step "WEATHER.LOCAL"   do_weather
+add_step "BATTERY.STATUS"  do_battery
+add_step "DISK.ROOT"       do_disk
+add_step "UPTIME.SYSTEM"   do_uptime
+add_step "BREW.OUTDATED"   do_brew_outdated
+add_step "NPM.GLOBAL"      do_npm_outdated
+add_step "REPOS.SCAN"      do_git_repos
+add_step "GH.NOTIFICATIONS" do_gh_notifications
+add_step "GH.PRS"          do_gh_prs
+add_step "CAL.TODAY"       do_calendar
+
+dash_run
+dash_summary ">> BRIEFING COMPLETE <<"
+exit "$FAILED"
