@@ -8,8 +8,17 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="$REPO_DIR/bin"
 BIN_DST="$HOME/.local/bin"
+LIB_SRC="$REPO_DIR/lib"
+LIB_DST="$HOME/.local/share/dashlib"
 
 mkdir -p "$BIN_DST"
+
+# Deploy the shared dashboard engine that most tools source.
+if [ -f "$LIB_SRC/dashlib.sh" ]; then
+  mkdir -p "$LIB_DST"
+  ln -sf "$LIB_SRC/dashlib.sh" "$LIB_DST/dashlib.sh"
+  echo "linked dashlib.sh -> $LIB_DST"
+fi
 
 echo "Linking tools from $BIN_SRC -> $BIN_DST"
 for tool in "$BIN_SRC"/*; do
